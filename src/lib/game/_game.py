@@ -5,7 +5,9 @@ import pygame
 ## immutable game states
 from pyrsistent import m, v, pmap, PRecord
 import time
-
+import threading, asyncio
+from ...lib import cli
+import logging, sys
 
 class Agent:
     def __init__(self):
@@ -42,22 +44,41 @@ class Game:
         self.game_type = game_type
         self.agents = list(agents)
         self.display = display
+        self._screen_lock = asyncio.Lock()
+
+    def run(self, display=True, play_again='query', speed=2, pause_on_turn=False):
         if display:
             pygame.init()
-            self.screen = pygame.display.set_mode((672, 480))
+            screen = pygame.display.set_mode((672, 480))
+        else:
+            screen = None
+        games = []
+        game_thread = threading.Thread(target=self._run_game,
+                                       args=(games, screen, play_again, speed, pause_on_turn))
+        game_thread.start()
+        if display:
+            self._run_display(screen, game_thread)
+        else:
+            game_thread.join()
+        return games
 
-    def run(self, play_again='query', speed=2):
+    def _run_game(self, games, screen=None, play_again='query', speed=2, pause_on_turn=False):
         while True:
-            self._run_round(speed)
-            if not play_again or play_again == 'query' and not self._play_again():
+            games += [self._run_round(speed, pause_on_turn)]
+            if not play_again \
+               or play_again == 'query' and not self._play_again() \
+               or isinstance(play_again, int) and len(games) < play_again:
                 break
 
-    def _run_round(self, speed):
+    def _run_round(self, speed, pause_on_turn, screen=None):
         state = self.game_type.init(self.agents)
         states = [state]
         i = -1
         self._draw_state(state)
-        if speed == 2:
+        if not screen:
+            turn_wait = 0
+            round_wait = 0
+        elif speed == 2:
             turn_wait = 0
             round_wait = 10
         elif speed == 1:
@@ -75,35 +96,50 @@ class Game:
                 action = agent.decide(state)
                 new_state = state.act(action)
                 if not new_state:
-                    print("Invalid action performed!")
+                    logging.info("Invalid action performed!")
             self._draw_state(new_state)
             if new_state in states:
-                print("State has been repeated! Therefore, game is over.")
+                logging.info("State has been repeated! Therefore, game is over.")
                 break
             states += [new_state]
             state = new_state
             end_t = int(round(time.time() * 1000))
             wait_time = turn_wait - (end_t - start_t)
-            # while True:
-            #     pygame.event.clear()
-            #     event = pygame.event.wait()
-            #     if event.type == pygame.KEYDOWN:
-            #         if event.key == pygame.K_SPACE:
-            #             break
+            if pause_on_turn:
+                while True:
+                    pygame.event.clear()
+                    event = pygame.event.wait()
+                    if event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_SPACE:
+                            break
             if wait_time > 0 and self.display:
                 pygame.time.wait(wait_time)
         for player_id, agent in enumerate(self.agents):
             agent.learn(states, player_id)
         pygame.time.wait(round_wait)
+        return states
+
+    def _run_display(self, screen, game_thread):
+        clock = pygame.time.Clock()
+        while game_thread.isAlive():
+            with (yield from self._screen_lock):
+                pygame.display.update()
+            clock.tick(15)
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    sys.exit()
+        pygame.quit()
 
     def _draw_state(self, state):
         if self.display:
             surf = state.draw()
-            # surf = pygame.transform.scale(surf, (672, 480))
-            self.screen.blit(surf, (0, 0))
-            pygame.display.flip()
+            with (yield from self._screen_lock):
+                self.screen.blit(surf, (0, 0))
 
     def _play_again(self):
+        if not self.display:
+            return cli.ask_yn('Play again?')
         font = pygame.font.SysFont("monospace", 32)
         font.set_bold(True)
         label = font.render("play again? (y/n)", 1, (255, 255, 255))
@@ -111,8 +147,8 @@ class Game:
         window_b = (window[0]-4, window[1]-4, window[2]+8, window[3]+8)
         pygame.draw.rect(self.screen, (255, 255, 255), window_b)
         pygame.draw.rect(self.screen, (0, 0, 0), window)
-        self.screen.blit(label, (window[0]+18, window[1]+7))
-        pygame.display.flip()
+        with (yield from self._screen_lock):
+            self.screen.blit(label, (window[0]+18, window[1]+7))
         while True:
             pygame.event.clear()
             event = pygame.event.wait()
@@ -121,6 +157,7 @@ class Game:
                     return True
                 if event.key == pygame.K_n:
                     return False
+
 
 class GameType:
     """A helper class that initializes the game state. Used as a class

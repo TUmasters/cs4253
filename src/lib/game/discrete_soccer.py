@@ -274,7 +274,7 @@ class SoccerState(GameState):
 
     @property
     def player_with_ball(self):
-        return next([p for p in self.players if p.has_ball], None)
+        return next((p for p in self.players if p.has_ball), [None])
 
     def goal_pos(self, team):
         """Returns the position of the `teams`'s goal."""
